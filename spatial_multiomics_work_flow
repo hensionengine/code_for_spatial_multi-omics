@@ -37,3 +37,579 @@ total_harmony <- RunUMAP(total_harmony, dims = 1:30, reduction="harmony")
 total_harmony <- RunTSNE(total_harmony, dims = 1:30, reduction="harmony")
 table(total_harmony$sample, total_harmony$RNA_snn_res.0.4)
 DimPlot(total_harmony, reduction = "umap", pt.size = 0.1, label = TRUE, label.size = 7)
+
+
+#wgcna
+library("Seurat")
+library("WGCNA")
+library("tidyverse")
+library("cowplot")
+library("patchwork")
+library("igraph")
+library(hdWGCNA)
+
+theme_set(theme_cowplot())
+set.seed(19971116)
+
+total<-readRDS("D:/r_analysis_data/spatial/Leiden_SLM_decon3_total.rds")
+
+rm(list = setdiff(ls(), c("total")))
+
+wgcna <- SetupForWGCNA(
+    total,
+    gene_select = "fraction",
+    fraction = 0.05,
+    wgcna_name = "my_analysis"
+)
+
+wgcna <- MetacellsByGroups(
+    seurat_obj = wgcna,
+    group.by = c("precise_region", "sample"),
+    reduction = 'harmony',
+    k = 25,
+    max_shared = 10,
+    ident.group = 'precise_region'
+)
+
+table(wgcna$metacell_grouping)
+
+metacell_obj <- GetMetacellObject(wgcna)
+
+head(metacell_obj)
+
+wgcna <- NormalizeMetacells(wgcna)
+
+wgcna <- SetDatExpr(
+     wgcna,
+     group_name = "remote",
+     group.by = "precise_region",
+     assay = 'RNA',
+     slot = 'data'
+ )
+
+wgcna <- TestSoftPowers(wgcna, networkType = "signed")
+plot_list <- PlotSoftPowers(wgcna)
+wrap_plots(plot_list, ncol=2)
+
+pdf(file = "C:/Users/Yingjun HAN/OneDrive/R/results/spatial/WGCNA/SOFT threshold.pdf", width = 15, height = 10)
+wrap_plots(plot_list, ncol=2)
+dev.off()
+
+wgcna <- ConstructNetwork(
+    wgcna,
+    soft_power = 20,
+    setDatExpr = FALSE,
+    minModuleSize = 30,
+    mergeCutHeight = 0.2,
+    tom_name = "remote_TOM"
+)
+
+wgcna <- ModuleEigengenes(wgcna)
+MEs <- GetMEs(wgcna)
+
+wgcna <- ModuleConnectivity(wgcna, group_name="remote")
+hub_df <- GetHubGenes(wgcna, n_hubs=10)
+
+wgcna <- RunModuleUMAP(
+    wgcna,
+    n_hubs = 10,
+    min_dist = 1,
+    spread = 5
+)
+
+ModuleNetworkPlot(wgcna)
+
+pdf(file = "C:/Users/Yingjun HAN/OneDrive/R/results/spatial/WGCNA/CO_expression dendrogram.pdf", width = 5, height = 4)
+PlotDendrogram(wgcna, main="Co-expression Dendrogram")
+dev.off()
+
+pdf(file = "C:/Users/Yingjun HAN/OneDrive/R/results/spatial/WGCNA/coor.pdf", width = 10, height = 15)
+PlotKMEs(wgcna, ncol=3)
+dev.off()
+
+grad_colors <- colorRampPalette(c("#2E75B6", "white", "#E06666"))(100)
+
+pdf(file = "C:/Users/Yingjun HAN/OneDrive/R/results/spatial/aWGCNA/coorheat.pdf", width = 5, height = 5)
+ModuleCorrelogram(wgcna, col = grad_colors)
+dev.off()
+
+pdf(file = "C:/Users/Yingjun HAN/OneDrive/R/results/spatial/WGCNA/ModuleUMAPPlot.pdf", width = 5, height = 5)
+ModuleUMAPPlot(wgcna)
+dev.off()
+
+HubGeneNetworkPlot(
+    wgcna,
+    n_hubs = 5,
+    n_other=5,
+    edge_prop = 0.75,
+    mods = 'all'
+)
+
+round(ModuleCorrelogram(wgcna)[["corr"]], 2)
+cor_mat_manual <- cor(MEs, method = "pearson")
+p<-ModuleCorrelogram(wgcna)
+
+wgcna$sham<-ifelse(wgcna$type == "sham", 1, 0)
+wgcna$MI3D<-ifelse(wgcna$type == "MI3D", 1, 0)
+wgcna$MI7D<-ifelse(wgcna$type == "MI7D", 1, 0)
+traits<-c("sham", "MI3D", "MI7D")
+
+test_wgcna <- ModuleTraitCorrelation(
+  wgcna,
+  traits = traits,
+ group.by = "precise_region",
+  features = 'hMEs',
+  cor_method = "pearson"
+)
+
+PlotModuleTraitCorrelation(
+    test_wgcna,
+    label = 'fdr',
+    label_symbol = 'stars',
+    text_size = 3,
+    high_color = "#FF6633",
+    mid_color = "white",
+    low_color = "lightblue",
+    plot_max = 1
+)
+
+
+#RCTD
+library(spacexr)
+library(STdeconvolve)
+library(Seurat)
+library(tidyverse)
+
+library(limma)
+library(dplyr)
+library(magrittr)
+library(Matrix)
+library(ggplot2)
+library(scales)
+library(tidyr)
+library(stringr)
+
+library(ggsankey)
+library(readxl)
+library(networkD3)
+
+library(DoubletFinder)
+library(SeuratData)
+
+total<-readRDS("D:/r_analysis_data/single_cell/cell_ann_cca0.5.rds")
+sc_counts=LayerData(total, assay="RNA", layer='counts')
+cell_types <- as.factor(total$celltype)
+names(cell_types) <- colnames(total)
+reference <- Reference(sc_counts, cell_types)
+
+rm(total)
+rm(sc_counts)
+rm(cell_types)
+gc()
+
+total<-readRDS("D:/r_analysis_data/spatial/spatial_ori_data/spatial_total_new.rds")
+st_counts=LayerData(total, assay="RNA", layer='counts')
+
+slices <- names(total@images)
+coords_list <- lapply(slices, function(slice_name) {
+    coords <- total@images[[slice_name]]@boundaries$centroids@coords
+    rownames(coords) <- total@images[[slice_name]]@boundaries$centroids@cells
+    return(coords)
+})
+coords_all <- do.call(rbind, coords_list)
+coords_all<-as.data.frame(coords_all)
+
+query <- SpatialRNA(coords_all, st_counts, colSums(st_counts))
+rm(list = setdiff(ls(), c("query", "reference")))
+gc()
+
+RCTD <- create.RCTD(query, reference, max_cores = 20)
+rm(query)
+rm(reference)
+gc()
+
+RCTD <- run.RCTD(RCTD, doublet_mode = "full")
+
+weights <- RCTD@results$weights
+norm_weights <- normalize_weights(weights)
+saveRDS(RCTD, "D:/r_analysis_data/spatial/RCTD.rds")
+rm(RCTD)
+rm(weights)
+total<-readRDS("D:/r_analysis_data/spatial/spatial_ori_data/spatial_total_new.rds")
+df_weights <- as.data.frame(norm_weights)
+rm(norm_weights)
+total <- AddMetaData(total, metadata = df_weights)
+saveRDS(total, "D:/r_analysis_data/spatial/decon_spatial_total.rds")
+
+output_dir <- "D:/r_analysis_data/spatial/results/deconvolution"
+
+slices <- names(total@images)
+
+lapply(slices, function(slice_name) {
+    pdf_file <- paste0(output_dir, "/decon", slice_name, ".pdf")
+    pdf(file = pdf_file, width = 11, height = 10)
+    print(
+        SpatialPlot(
+            total,
+            images = slice_name,
+            crop = TRUE,
+            image.alpha = 0,
+            alpha = 1,
+            features = colnames(df_weights)
+        )
+    )
+    dev.off()
+})
+
+library(STdeconvolve)
+
+custom_colors <- c(
+     '#3cb44b', '#ffe119', '#e6194B','#aaffc3', '#f58231',
+     '#911eb4', '#42d4f4',  '#9A6324','#f032e6', '#fabed4', '#469990')
+
+output_dir <- "D:/r_analysis_data/spatial/results/deconvolution"
+
+slices <- names(total@images)
+
+lapply(slices, function(slice_name) {
+    pdf_file <- paste0(output_dir, "/ratiopie_", slice_name, ".pdf")
+    coords <- total@images[[slice_name]]@boundaries$centroids@coords
+    rownames(coords) <- total@images[[slice_name]]@boundaries$centroids@cells
+    pdf(file = pdf_file, width = 11, height = 10)
+    print(
+        vizAllTopics(theta = df_weights,pos = coords, r=165, lwd=0.000000001, groups = NA,topicCols = custom_colors,showLegend = TRUE)
+    )
+    dev.off()
+})
+
+#cell niche
+install.packages("compositions")
+library(compositions)
+celltype_ilr <- ilr(total@meta.data[, c(25:34)])
+
+celltype_matrix <- as.matrix(celltype_ilr)
+
+class(celltype_matrix)  # check if return "matrix"/"array"
+colnam<-paste0("ilr_", c(1:9))
+colnames(celltype_matrix)<-colnam #add colname
+
+total[["ilr"]] <- CreateDimReducObject(
+    embeddings = celltype_matrix,  
+    key = "ilr_",                  
+    assay = "RNA"                  
+)
+
+visium <- FindNeighbors(total, reduction = "ilr", dims = 1:9)
+resolutions <- seq(from = 0.1, to = 1.0, by = 0.1)
+visium <- FindClusters(visium, resolution = resolutions, algorithm = 1, cluster.name = paste0("Louvein_ilr_", "snn_res.",resolutions))
+resolutions <- seq(from = 0.01, to = 0.1, by = 0.01)
+visium <- FindClusters(visium, resolution = resolutions, algorithm = 1, cluster.name = paste0("Louvein_ilr_", "snn_res.",resolutions))
+resolutions <- seq(from = 0.1, to = 1.0, by = 0.1)
+visium <- FindClusters(visium, resolution = resolutions, algorithm = 2, cluster.name = paste0("Louve_adv_ilr_", "snn_res.",resolutions))
+resolutions <- seq(from = 0.01, to = 0.1, by = 0.01)
+visium <- FindClusters(visium, resolution = resolutions, algorithm = 2, cluster.name = paste0("Louve_adv_ilr_", "snn_res.",resolutions))
+
+clustree(visium, prefix = "Louve_adv_ilr_snn_res.") 
+visium$niche_clusters<-visium$Louve_adv_ilr_snn_res.0.04
+
+ SpatialDimPlot(visium, images=c("slice_sham8","slice_sham11","slice_sham4","slice_MI3D2","slice_MI3D7","slice_MI3D16","slice_MI7D10","slice_MI7D12","slice_MI7D14"),image.alpha = 0,alpha = 1,group.by = "Louve_adv_ilr_snn_res.0.04" ,ncol=3, cols = c( "0"='#e6194B',"1"= '#3cb44b',"2"= '#ffe119', "3"='#4363d8', "4"='#f58231', "5"='#911eb4', "6"='#42d4f4', "7"='#f032e6'))
+
+DimPlot(visium, reduction = "umap_ilr", pt.size = 0.1, group.by = "Louve_adv_ilr_snn_res.0.04", cols = custom_colors, label = TRUE, label.size = 11, raster=FALSE)+ theme(aspect.ratio = 1, axis.title = element_text(size = 25), axis.text = element_text(size = 25))
+
+niche_cell_table<-visium@meta.data[, c(25:34, 99)]
+na_rows <- which(apply(niche_cell_table, 1, function(row) any(is.na(row))))
+niche_cell_table<-niche_cell_table[-na_rows,]
+
+niche_composition <- niche_cell_table %>%
+    group_by(niche_clusters) %>%
+    summarise(across(where(is.numeric), mean)) 
+
+df<-t(niche_composition)
+colnames(df)<-paste0("Niche ", c(1:6))
+df<-df[-1, ]
+
+df <- matrix(
+     as.numeric(df),  
+     nrow = nrow(df),
+     ncol = ncol(df),
+     dimnames = dimnames(df)
+ )
+
+exp <- t(df)
+
+exp100<-exp*100
+arranged_exp100<-exp100[, c(3, 4, 7, 6, 9, 10, 1, 8, 5, 2)]
+
+library(ComplexHeatmap)
+library(circlize)
+
+col_fun <- colorRamp2(
+    c(0, 50), 
+    c("#FFFAFA", "#FF6666")
+    )
+Heatmap(t(arranged_exp100),
+        cluster_rows = FALSE,
+        cluster_columns = FALSE,
+        col = col_fun,
+        rect_gp = gpar(col = "#666666", lwd = 1),
+       
+        column_names_rot = 45,          
+        column_names_centered = TRUE,  
+        
+        #column_names_gp = gpar(fontsize = 10),
+        heatmap_legend_param = list(
+            title = "Percentage",
+            at = seq(0, 50, 10),
+            legend_direction = "vertical"
+        )
+)
+
+
+cell_types <- names(niche_cell_table)[names(niche_cell_table) != "niche_clusters"]
+
+groups <- unique(niche_cell_table$niche_clusters)
+
+
+results <- list()
+
+cell_types <- names(niche_cell_table)[names(niche_cell_table) != "niche_clusters"]
+
+groups <- unique(niche_cell_table$niche_clusters)
+
+
+results <- list()
+
+for (group in groups) {
+    
+    temp_results <- list()
+    pvalues <- c()
+    
+   
+    for (cell in cell_types) {
+        
+        group_data <- niche_cell_table[[cell]][niche_cell_table$niche_clusters == group]
+        other_data <- niche_cell_table[[cell]][niche_cell_table$niche_clusters != group]
+        
+        
+        mean_group <- mean(group_data)
+        mean_other <- mean(other_data)
+        fold_change <- mean_group / mean_other
+        
+        
+        test_result <- wilcox.test(group_data, other_data, paired = FALSE)
+        
+        
+        temp_results[[cell]] <- list(
+            group = group,
+            cell_type = cell,
+            comparison = paste0("group_", group, "_vs_others"),
+            mean_group = mean_group,
+            mean_other = mean_other,
+            foldchange = fold_change,
+            statistic = test_result$statistic,
+            pvalue = test_result$p.value
+        )
+        
+     
+        pvalues <- c(pvalues, test_result$p.value)
+    }
+    
+   
+    padj <- p.adjust(pvalues, method = "BH")
+    
+   
+    for (i in seq_along(cell_types)) {
+        cell <- cell_types[i]
+        result <- temp_results[[cell]]
+        result$padj <- padj[i]
+        # 合并到全局结果列表中
+        results[[paste(group, cell, sep = "_")]] <- result
+    }
+}
+result_df <- do.call(rbind, lapply(results, as.data.frame))
+result_df$padj_total <- p.adjust(result_df$pvalue, method = "BH")
+result_df$nichename<-paste0("Niche ", (as.numeric(result_df$group)+1)) 
+
+result_df$Significance = ifelse((result_df$padj_total<0.05) & (abs(log2(result_df$foldchange))>log2(1.7)), ifelse(log2(result_df$foldchange)>log2(1.7),"Up","Down"), "Not")
+result_df$direction = ifelse((result_df$padj_total<0.05) & (abs(log2(result_df$foldchange))>log2(1.7)), ifelse(log2(result_df$foldchange)>log2(1.7),"↑","↓"), "")
+result_df$sig <- ifelse(result_df$Significance != "Not", "*", "")
+
+filtered_result_df <- result_df %>% filter(result_df$Significance != "Not") 
+
+
+significance_matrix <- matrix("", 
+                              nrow = nrow(arragned_exp100), 
+                              ncol = ncol(arragned_exp100),
+                              dimnames = dimnames(arragned_exp100))
+
+
+
+for(i in 1:nrow(filtered_result_df)) {
+
+niche <- filtered_result_df$nichename[i]
+cell <- filtered_result_df$cell_type[i]
+mark <- filtered_result_df$direction[i]
+
+if (identical(niche %in% rownames(significance_matrix), TRUE) &&
+identical(cell %in% colnames(significance_matrix), TRUE)) {
+significance_matrix[niche, cell] <- mark
+}
+}
+
+
+significance_matrix_star <- matrix("", 
+                              nrow = nrow(arragned_exp100), 
+                              ncol = ncol(arragned_exp100),
+                              dimnames = dimnames(arragned_exp100))
+
+
+
+for(i in 1:nrow(filtered_result_df)) {
+   
+    niche <- filtered_result_df$nichename[i]
+    cell <- filtered_result_df$cell_type[i]
+    mark <- filtered_result_df$direction[i]
+   
+    if (identical(niche %in% rownames(significance_matrix_star), TRUE) &&
+        identical(cell %in% colnames(significance_matrix_star), TRUE)) {
+        significance_matrix_star[niche, cell] <- "*"
+    }
+}
+
+add_text <- function(j, i, x, y, width, height, significance_matrix, ...) {
+
+label <- significance_matrix[i, j]
+
+grid.text(label, x = x , y = y ,
+gp = gpar(col = "black", fontsize = 15))
+}
+
+
+add_text_star <- function(j, i, x, y, width, height, significance_matrix, ...) {
+    
+    label <- significance_matrix[i, j]
+    
+    grid.text(label, x = x + (width / 7) , y = y - (height / 7),
+              gp = gpar(col = "black", fontsize = 20))
+}
+
+library(ComplexHeatmap)
+library(circlize)
+col_fun <- colorRamp2(
+c(0, 50),
+c("#FFFAFA", "#FF6666")
+)
+
+Heatmap(
+t(arragned_exp100),  
+cluster_rows = FALSE,
+cluster_columns = FALSE,
+col = col_fun,  
+rect_gp = gpar(col = "#666666", lwd = 1),
+column_names_rot = 45,
+column_names_centered = TRUE,
+heatmap_legend_param = list(
+title = "Percentage",
+at = seq(0, 50, 10),
+legend_direction = "vertical"
+),
+cell_fun = function(j, i, x, y, width, height, ...) {
+add_text(j, i, x, y, width, height, significance = t(significance_matrix), ...)
+add_text_star(j, i, x, y, width, height, significance = t(significance_matrix_star), ...)
+}
+)
+
+
+#MISTYR
+library(mistyR)
+library(tidyverse)
+library(dplyr)
+
+niche_cell_table<-visium@meta.data[, c(25:34, 99)]
+whole_coord<-visium@meta.data[,c("pxl_row_in_fullres", "pxl_col_in_fullres", "short_cut")]
+colnames(niche_cell_table)<-make.names(colnames(niche_cell_table))
+
+cell_proportions<-niche_cell_table[,1:10]
+coords<-whole_coord[,c(1:2)]
+
+dist_matrix <- as.matrix(dist(coords[,c(1:2)]))
+diag(dist_matrix) <- NA
+min_dist <- min(dist_matrix, na.rm = TRUE)
+
+intra_view <- create_initial_view(cell_proportions)
+
+views <- intra_view %>%
+    # Juxta
+    add_juxtaview(
+        positions = coords,
+        neighbor.thr = min_dist * 1.1  # 'neighbor.thr'
+    ) %>%
+    # Para
+    add_paraview(
+        positions = coords,
+        l = min_dist * 2.1   # 'neighbor.thr'
+    )
+
+run_misty(
+    views,
+    target = colnames(cell_proportions),
+    results.folder = "D:/r_analysis_data/spatial/misty"
+)
+
+misty.results <- collect_results("D:/r_analysis_data/spatial/misty")
+
+#intraview
+importance_matrix <- filter(misty.results[["importances"]], grepl("intra", misty.results[["importances"]]$view))%>%
+    tidyr::pivot_wider(
+        names_from = Predictor,
+        values_from = Importance
+    ) %>%
+    tibble::column_to_rownames("Target") %>%
+    as.matrix()
+
+df <- matrix(
+    as.numeric(importance_matrix[, -c(1,2)]),
+    nrow = nrow(importance_matrix[, -c(1,2)]),
+    ncol = ncol(importance_matrix[, -c(1,2)]),
+    dimnames = dimnames(importance_matrix[, -c(1,2)])
+)
+df[is.na(df)] <- 0
+
+arranged_df<-df[, c(3, 4, 7, 6, 9, 10, 1, 8, 5, 2)]
+arranged_df<-arranged_df[c(3, 4, 7, 6, 9, 10, 1, 8, 5, 2), ]
+library(ComplexHeatmap)
+Heatmap(t(arranged_df),
+        cluster_rows = FALSE,
+        cluster_columns = FALSE,
+        rect_gp = gpar(col = "#666666", lwd = 1),
+)
+
+
+#go_kegg_enrichment
+siggenes<-read.csv("D:/r_analysis_data/siggenes.csv", sep = ",", fill = TRUE, header = T, stringsAsFactors = FALSE,encoding = "UTF-8")
+library("clusterProfiler")
+library("org.Mm.eg.db")
+library("enrichplot")
+library("ggplot2")
+genes<-siggenes$gene
+entrezIDs <- mget(genes, org.Mm.egSYMBOL2EG, ifnotfound=NA)  
+entrezIDs<-t(as.data.frame(entrezIDs))
+entrezIDs<-na.omit(entrezIDs)
+
+go <- enrichGO(gene = entrezIDs,
+               OrgDb = org.Mm.eg.db, 
+               pvalueCutoff =1, 
+               qvalueCutoff = 1,
+               ont="all",
+               readable =T)
+
+dotplot(go,showCategory = 30,split="ONTOLOGY") + facet_grid(ONTOLOGY~., scale='free')      #气泡图bubble
+
+kegg <- enrichKEGG(gene = entrezIDs, organism = "mmu", pvalueCutoff =1, qvalueCutoff =1)   #富集分析
+kegg <- setReadable(kegg, 
+                              OrgDb = org.Mm.eg.db, 
+                              keyType = "ENTREZID")  # 指定输入ID类型， 并转换为symbol
+
+dotplot(kegg, showCategory = 30)
+
+
