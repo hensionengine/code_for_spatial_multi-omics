@@ -1,0 +1,39 @@
+library(limma)
+library(Seurat)
+library(dplyr)
+library(magrittr)
+library(Matrix)
+library(ggplot2)
+library(scales)
+library(tidyr)
+
+
+total <- readRDS("D:/r_analysis_data/spatial/spatial.rds")
+
+library(harmony)
+total <- NormalizeData(object = total, normalization.method = "LogNormalize", scale.factor = 10000)
+
+total<- FindVariableFeatures(object = total, selection.method = "vst", nfeatures = 2000)
+top10 <- head(x = VariableFeatures(object = total), 10)
+plot1 <- VariableFeaturePlot(object = total)
+
+plot2 <- LabelPoints(plot = plot1, points = top10, repel = TRUE,
+                     min.segment.length = 0, 
+                     max.overlaps = 20, 
+                      force = 10, 
+                      size = 4,
+                      box.padding = 0.3) 
+plot2
+total <- ScaleData(total, features = rownames(total)) 
+total=RunPCA(object= total,npcs = 50,pc.genes=VariableFeatures(object = total))
+total_harmony <- RunHarmony(total, group.by.vars = "sample")
+ElbowPlot(total_harmony, ndims=50, reduction="harmony")
+total_harmony <- FindNeighbors(object = total_harmony, reduction="harmony", dims = 1:30)
+total_harmony <- FindClusters(total_harmony, resolution = seq(from = 0.1, to = 1, by = 0.1)) 
+library(clustree)
+library(igraph)
+clustree(total_harmony) 
+total_harmony <- RunUMAP(total_harmony, dims = 1:30, reduction="harmony") 
+total_harmony <- RunTSNE(total_harmony, dims = 1:30, reduction="harmony")
+table(total_harmony$sample, total_harmony$RNA_snn_res.0.4)
+DimPlot(total_harmony, reduction = "umap", pt.size = 0.1, label = TRUE, label.size = 7)
